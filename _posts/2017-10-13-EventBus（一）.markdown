@@ -1,0 +1,280 @@
+EventBus是基于Publisher/Susbcriber（发布者、订阅者）模型的。
+常规的使用方式的如下：
+```java
+EventBus.getDefault().register(this);
+
+```
+通过查看EventBus的源码来了解这段代码发生了什么?
+EventBus获取它的事例对象是通过单例模式：
+```java
+static volatile EventBus defaultInstance;
+public static EventBus getDefault() {
+    if (defaultInstance == null) {
+        synchronized (EventBus.class) {
+            if (defaultInstance == null) {
+                defaultInstance = new EventBus();
+            }
+        }
+    }
+    return defaultInstance;
+}
+
+```
+那么在EventBus的构造函数中发生了什么?
+```java
+public EventBus() {
+    this(DEFAULT_BUILDER);
+}
+
+EventBus(EventBusBuilder builder) {
+    subscriptionsByEventType = new HashMap<>();
+    typesBySubscriber = new HashMap<>();
+    stickyEvents = new ConcurrentHashMap<>();
+    mainThreadPoster = new HandlerPoster(this, Looper.getMainLooper(), 10);
+    backgroundPoster = new BackgroundPoster(this);
+    asyncPoster = new AsyncPoster(this);
+    indexCount = builder.subscriberInfoIndexes != null ? builder.subscriberInfoIndexes.size() : 0;
+    subscriberMethodFinder = new SubscriberMethodFinder(builder.subscriberInfoIndexes,
+            builder.strictMethodVerification, builder.ignoreGeneratedIndex);
+    logSubscriberExceptions = builder.logSubscriberExceptions;
+    logNoSubscriberMessages = builder.logNoSubscriberMessages;
+    sendSubscriberExceptionEvent = builder.sendSubscriberExceptionEvent;
+    sendNoSubscriberEvent = builder.sendNoSubscriberEvent;
+    throwSubscriberException = builder.throwSubscriberException;
+    eventInheritance = builder.eventInheritance;
+    executorService = builder.executorService;
+}
+
+
+```
+通过getDefaul()创建EventBus的无参构造函数，午餐构造函数传递一个EventBusBuilder来初始化一些必要的辅助对象。待会通过分析register函数来了解这些辅助对象的作用。
+现在知道EventBus通过单利的方式来将自己的对象暴露出来，并且在第一次创建的时候通过构造函数初始化必要的辅助对象。随后将自己注册到EventBus中成为订阅者，用来监听发布者发布自己已经注册的事件，例如我们通常使用将Activity/Fragment注册为订阅者，
+```java
+public void register(Object subscriber) {
+    Class<?> subscriberClass = subscriber.getClass();
+    List<SubscriberMethod> subscriberMethods = subscriberMethodFinder.findSubscriberMethods(subscriberClass);
+    synchronized (this) {
+        for (SubscriberMethod subscriberMethod : subscriberMethods) {
+            subscribe(subscriber, subscriberMethod);
+        }
+    }
+}
+
+```
+传递当前当前Activity的对象来获取它的class，再通过subscriberMethodFinder类来寻找当前Activity中已经注册的事件函数（也就是带有@Subscribe（threadMode = ）注解的方法）。这个subscriberMethodFinder对象实在上面构造函数中初始化的。进入到subscriberMethodFinder里看看它是如何查找这些函数的。
+```java
+private static final Map<Class<?>, List<SubscriberMethod>> METHOD_CACHE = new ConcurrentHashMap<>();
+
+List<SubscriberMethod> findSubscriberMethods(Class<?> subscriberClass) {
+    List<SubscriberMethod> subscriberMethods = METHOD_CACHE.get(subscriberClass);
+    if (subscriberMethods != null) {
+        return subscriberMethods;
+    }
+
+    if (ignoreGeneratedIndex) {
+        subscriberMethods = findUsingReflection(subscriberClass);
+    } else {
+        subscriberMethods = findUsingInfo(subscriberClass);
+    }
+    if (subscriberMethods.isEmpty()) {
+        throw new EventBusException("Subscriber " + subscriberClass
+                + " and its super classes have no public methods with the @Subscribe annotation");
+    } else {
+        METHOD_CACHE.put(subscriberClass, subscriberMethods);
+        return subscriberMethods;
+    }
+}
+
+```
+首先判断在METHOD_CACHE中有没有缓存这个class对应的SubscriberMethod列表，如果有就直接返回。这个SubscriberMethod是将我们寻找的目标注册的事件函数包装起来，通过下面的构造函数它是用来记录一个事件函数的所有信息，包括它的threadMode、参数事件类型eventType、这个事件的优先级priority、它是否是粘滞事件sticky等等。
+```java
+public SubscriberMethod(Method method, Class<?> eventType, ThreadMode threadMode, int priority, boolean sticky) {
+    this.method = method;
+    this.threadMode = threadMode;
+    this.eventType = eventType;
+    this.priority = priority;
+    this.sticky = sticky;
+}
+
+```
+回到subscriberMethodFinder中继续看，这个METHOD_CACHE是用来关联当前class和已经注册事件函数列表。它是并发的HashMap用来保护线程安全的。继续往下走，从构造函数中我们可以得知ignoreGeneratedIndex为false，它会走到findUsingInfo这个函数，随后我们也会分析findUsingReflection它的机制以及ignoreGeneratedIndex是什么含义。
+```java
+private List<SubscriberMethod> findUsingInfo(Class<?> subscriberClass) {
+    FindState findState = prepareFindState();
+    findState.initForSubscriber(subscriberClass);
+    while (findState.clazz != null) {
+        //......
+    }
+    return getMethodsAndRelease(findState);
+}
+
+```
+在这个函数里有一个类FindState扮演了重要的角色！在SubscriberMethodFinder中维护了一个FindState对象池，默认大小是4个：
+```java
+private static final int POOL_SIZE = 4;
+private static final FindState[] FIND_STATE_POOL = new FindState[POOL_SIZE];
+```
+prepareFindState函数通过从对象池中来获取一个FindState对象。在findUsingInfo函数中有个while循环，判断findState.clazz是否为空来一直向上层遍历查找事件方法，FindState类中有三个成员变量:
+```java
+Class<?> subscriberClass; //这个是用来保存当前注册的class对象 也就是Activity的class
+Class<?> clazz;           //这个是用来保存父类的class对象
+boolean skipSuperClasses; //这个用来判断是否跳过父类的检查
+
+```
+这三个变量的作用已经在注释中写清楚的了，在findUsingInfo中，findState.initForSubscriber就是将subscriberClass和clazz对象初始化为当前注册的事件对象即Activity，如下：
+```java
+void initForSubscriber(Class<?> subscriberClass) {
+    this.subscriberClass = clazz = subscriberClass;
+    skipSuperClasses = false;
+    subscriberInfo = null;
+}
+
+```
+记着这个初始化函数里将skipSuperClasses初始化为false，待会再下面的时候可以看到它的作用。findUsingInfo中主要逻辑都在while循环体中，看看循环体中具体做了哪些工作:
+```java
+findState.subscriberInfo = getSubscriberInfo(findState);
+if (findState.subscriberInfo != null) {
+    SubscriberMethod[] array = findState.subscriberInfo.getSubscriberMethods();
+    for (SubscriberMethod subscriberMethod : array) {
+        if (findState.checkAdd(subscriberMethod.method, subscriberMethod.eventType)) {
+            findState.subscriberMethods.add(subscriberMethod);
+        }
+    }
+} else {
+    findUsingReflectionInSingleClass(findState);
+}
+findState.moveToSuperclass();
+
+```
+getSubscriberInfo用来获得订阅者信息，这个订阅者信息包含什么内容呢?
+```java
+public interface SubscriberInfo {
+    Class<?> getSubscriberClass();
+
+    SubscriberMethod[] getSubscriberMethods();
+
+    SubscriberInfo getSuperSubscriberInfo();
+
+    boolean shouldCheckSuperclass();
+}
+
+```
+订阅者信息SubscriberInfo它是一个接口类，从它的实现函数名称可以明显的看出这些函数的作用。
+```java
+private SubscriberInfo getSubscriberInfo(FindState findState) {
+    if (findState.subscriberInfo != null && findState.subscriberInfo.getSuperSubscriberInfo() != null) {
+        SubscriberInfo superclassInfo = findState.subscriberInfo.getSuperSubscriberInfo();
+        if (findState.clazz == superclassInfo.getSubscriberClass()) {
+            return superclassInfo;
+        }
+    }
+    if (subscriberInfoIndexes != null) {
+        for (SubscriberInfoIndex index : subscriberInfoIndexes) {
+            SubscriberInfo info = index.getSubscriberInfo(findState.clazz);
+            if (info != null) {
+                return info;
+            }
+        }
+    }
+    return null;
+}
+
+```
+在getSubscriberInfo函数中，结合FindState的初始化函数initForSubscriber中我们得知 这个findState.subscriberInfo为null，所以第一个if条件不成立，第二，在SubscriberMethodFinder构造函数中，即在EventBusBuilder中得知，这个subscriberInfoIndexes它初始化便是一个空的集合，综上所述，getSubscriberInfo返回个Null，并无卵用。。此时跳回到循环体中，第一个if条件不成立，因为它返回了NULL，这时走向了findUsingReflectionInSingleClass(findState)这个方法，这个方法才是整个register核心的逻辑所在之处。是的！
+```java
+private void findUsingReflectionInSingleClass(FindState findState) {
+    Method[] methods;
+    try {
+        // This is faster than getMethods, especially when subscribers are fat classes like Activities
+        methods = findState.clazz.getDeclaredMethods();
+    } catch (Throwable th) {
+        // Workaround for java.lang.NoClassDefFoundError, see https://github.com/greenrobot/EventBus/issues/149
+        methods = findState.clazz.getMethods();
+        findState.skipSuperClasses = true;
+    }
+    for (Method method : methods) {
+        int modifiers = method.getModifiers();
+        if ((modifiers & Modifier.PUBLIC) != 0 && (modifiers & MODIFIERS_IGNORE) == 0) {
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            if (parameterTypes.length == 1) {
+                Subscribe subscribeAnnotation = method.getAnnotation(Subscribe.class);
+                if (subscribeAnnotation != null) {
+                    Class<?> eventType = parameterTypes[0];
+                    if (findState.checkAdd(method, eventType)) {
+                        ThreadMode threadMode = subscribeAnnotation.threadMode();
+                        findState.subscriberMethods.add(new SubscriberMethod(method, eventType, threadMode,
+                                subscribeAnnotation.priority(), subscribeAnnotation.sticky()));
+                    }
+                }
+            } else if (strictMethodVerification && method.isAnnotationPresent(Subscribe.class)) {
+                String methodName = method.getDeclaringClass().getName() + "." + method.getName();
+                throw new EventBusException("@Subscribe method " + methodName +
+                        "must have exactly 1 parameter but has " + parameterTypes.length);
+            }
+        } else if (strictMethodVerification && method.isAnnotationPresent(Subscribe.class)) {
+            String methodName = method.getDeclaringClass().getName() + "." + method.getName();
+            throw new EventBusException(methodName +
+                    " is a illegal @Subscribe method: must be public, non-static, and non-abstract");
+        }
+    }
+}
+
+private static final int MODIFIERS_IGNORE = Modifier.ABSTRACT | Modifier.STATIC | BRIDGE | SYNTHETIC;
+
+```
+这个方法的主要工作就是来获取当前订阅者class中所有声明的函数列表，通过迭代循环对每个函数Method校验，校验的条件便是代码中所展示的几个要点：
+
+	1. 函数的修饰符是否为public，并且不是MODIFIERS_IGNORE中任何一种修饰符
+	2. 获取函数的参数列表，如果参数列表不是1则抛出异，否则获取它的注解
+	3. 如果注解是NULL则跳过继续下次循环，反之，校验当前函数和事件类型是否可以添加，如果可以添加则将已经找到的事件Method的所有信息包裹在新的SubscriberMethod对象中，并将此对象添加了findState的subscriberMethods中
+
+最后我们还是回到之前讲的循环体中，最后一行代码findState.moveToSuperclass()：
+```java
+void moveToSuperclass() {
+    if (skipSuperClasses) {
+        clazz = null;
+    } else {
+        clazz = clazz.getSuperclass();
+        String clazzName = clazz.getName();
+        /** Skip system classes, this just degrades performance. */
+        if (clazzName.startsWith("java.") || clazzName.startsWith("javax.") || clazzName.startsWith("android.")) {
+            clazz = null;
+        }
+    }
+}
+
+```
+这个函数的主要作用便是将当前的clazz对象指向父类的class，直至clazz为NULL，循环结束。
+
+Ok到这里整个SubscriberMethodFinder的工作都做完了，通过FindState辅助检测订阅者中所有已经声明的函数体，找到我们想要的那个订阅事件函数，并将所有的函数添加到集合里然后返回到register函数。这个我们又回到register函数里：
+在获得SubscriberMethod列表list之后，对该list迭代，调用subscribe(）方法，这里多出来了Subscription，它表示订阅者和订阅函数之间的一种关联，一一对应的关系，每个subscription都包含一个状态active表示当前subscription是否存活。
+在EventBus里维护着一个重要的数据结构subscriptionsByEventType，一个订阅事件和与之关联的所有Subscriptions的映射集合。在post事件的时候，EventBus也是从这个HashMap中根据特定的事件找到所有订阅者和订阅此事件的方法。
+```java
+private void subscribe(Object subscriber, SubscriberMethod subscriberMethod) {
+    Class<?> eventType = subscriberMethod.eventType;
+    Subscription newSubscription = new Subscription(subscriber, subscriberMethod);
+    CopyOnWriteArrayList<Subscription> subscriptions = subscriptionsByEventType.get(eventType);
+    if (subscriptions == null) {
+        subscriptions = new CopyOnWriteArrayList<>();
+        subscriptionsByEventType.put(eventType, subscriptions);
+    } else {
+        if (subscriptions.contains(newSubscription)) {
+            throw new EventBusException("Subscriber " + subscriber.getClass() + " already registered to event "
+                    + eventType);
+        }
+    }
+
+    int size = subscriptions.size();
+    for (int i = 0; i <= size; i++) {
+        if (i == size || subscriberMethod.priority > subscriptions.get(i).subscriberMethod.priority) {
+            subscriptions.add(i, newSubscription);
+            break;
+        }
+    }
+
+  //.............
+}
+
+```
+
+至此register的所有流程已经走完了。总结一下它的大体流程便是：通过订阅者找到所有的订阅函数，订阅函数包含了线程模式、事件类型、优先级等重要的信息，将每个订阅者和订阅函数打包抽象为一个Subscription对象，并将此对象的列表与一个特定的事件相关联，以map的形式存储起来。
