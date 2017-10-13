@@ -22,7 +22,7 @@ blog_button:
 
 # Navigation buttons in the front page.
 nav:
-    - {title: Projects, description: My Projects, url: 'http://jsonhu.github.io'}
+    - {title: Projects, description: My Projects, url: 'https://github.com/jsonhu'}
     # - {title: Another Button, description: A button, url: 'http://example.com'}
 
 # Pagination
