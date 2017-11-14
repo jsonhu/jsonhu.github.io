@@ -29,7 +29,7 @@ static class MyLogger{
     }
 
 ```
-上面定义的MyLogger类，Logger通过单例模式来获取对象，在多线程的条件下平时我们可能会通过双重锁的形式保证对象的正确性，但是这里我们不会用同步锁的形式，因为这个Logger对象相对于每个线程它是独立的，并不会相互依赖，所以没有互斥的概念。在上面的Logger类中定义了一个全局的变量 sThreadLocal,在getInstance方法中首先通过ThreadLocal的get方法来获得Logger对象，如果它不为null就返回，如果是null的话就new一个对象出来然后再将这个对象set到ThreadLocal中，ThreadLocal会将这个对象和当前线程绑定。
+上面定义的MyLogger类，Logger通过单例模式来获取对象，在多线程的条件下平时我们可能会通过双重锁的形式保证对象的正确性，但是这里我们不会用同步锁的形式，因为这个Logger对象相对于每个线程它是独立的，并不会相互依赖，所以没有互斥的概念。在上面的Logger类中定义了一个全局的变量 sThreadLocal,在getInstance方法中首先通过ThreadLocal的get方法来获得Logger对象，如果它不为null就返回，如果是null的话就new一个对象出来然后再将这个对象set到ThreadLocal中，ThreadLocal会将这个对象和当前线程绑定。下面的代码就是创建几个线程，创建一个共有的runnable对象，run方法中就是调用Logger的打印当前线程的信息：
 
 ```java
     private static Runnable shareRunnable = new Runnable() {
@@ -48,10 +48,38 @@ static class MyLogger{
     }
 
 ```
-
+运行的结果：
 
 ```java
 Thread-0: printMsg
 Thread-2: printMsg
 Thread-1: printMsg
 ```
+
+在Android的消息循环机制中，Looper对象的获取也采用了ThreadLocal技术，它保证了一个线程中有且仅有一个Looper，在ActivityThread的main函数中看到Looper的初始化：
+```java
+        Looper.prepareMainLooper();
+        ...
+        Looper.loop();
+
+```
+Looper的prepareMainLooper方法会调用它内部的prepare方法：
+```java
+    public static void prepareMainLooper() {
+        prepare(false);
+        synchronized (Looper.class) {
+            if (sMainLooper != null) {
+                throw new IllegalStateException("The main Looper has already been prepared.");
+            }
+            sMainLooper = myLooper();
+        }
+    }
+
+    private static void prepare(boolean quitAllowed) {
+        if (sThreadLocal.get() != null) {
+            throw new RuntimeException("Only one Looper may be created per thread");
+        }
+        sThreadLocal.set(new Looper(quitAllowed));
+    }
+```
+看到prepare方法中他会检查ThreadLocal中是否已经有了Looper对象，如果有的话就抛出异常，如果没有的话创建一个Looper对象并且设置到ThreadLocal中，这和上面Logger获取它的对象方式很相似。
