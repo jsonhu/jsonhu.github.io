@@ -83,3 +83,47 @@ Looper的prepareMainLooper方法会调用它内部的prepare方法：
     }
 ```
 看到prepare方法中他会检查ThreadLocal中是否已经有了Looper对象，如果有的话就抛出异常，如果没有的话创建一个Looper对象并且设置到ThreadLocal中，这和上面Logger获取它的对象方式很相似。
+
+### ThreadLocal背后做了什么
+透过源码来理解ThreadLocal是如何实现线程局部存储的。
+首先从它的get方法入手：
+```java
+    public T get() {
+        Thread t = Thread.currentThread();
+        ThreadLocalMap map = getMap(t);
+        if (map != null) {
+            ThreadLocalMap.Entry e = map.getEntry(this);
+            if (e != null)
+                return (T)e.value;
+        }
+        return setInitialValue();
+    }
+```
+得到当前线程来获取一个ThreadLocalMap对象，这个ThreadLocalMap是ThreadLocal的内部类，它是一个自定义的散列表，初始情况下这个map是null，所以会走到setInitialValue方法中：
+```java
+    private T setInitialValue() {
+        T value = initialValue();
+        Thread t = Thread.currentThread();
+        ThreadLocalMap map = getMap(t);
+        if (map != null)
+            map.set(this, value);
+        else
+            createMap(t, value);
+        return value;
+    }
+```
+这里通过createMap函数创建了这个map，找打对应的ThreadLocalMap的构造函数：
+```java
+    void createMap(Thread t, T firstValue) {
+        t.threadLocals = new ThreadLocalMap(this, firstValue);
+    }
+
+    ThreadLocalMap(ThreadLocal firstKey, Object firstValue) {
+            table = new Entry[INITIAL_CAPACITY];
+            int i = firstKey.threadLocalHashCode & (INITIAL_CAPACITY - 1);
+            table[i] = new Entry(firstKey, firstValue);
+            size = 1;
+            setThreshold(INITIAL_CAPACITY);
+    }
+```
+在ThreadLocalMap中维护了一个Entry数组，这个Entry继承自WeakReference，以ThreadLocal为key，以ThreadLocal要存储的对象为value，在上面的构造函数中可以看到它先初始化了一个Entry数组，通过ThreadLocal的nextHashCode散列函数得到它在数组中的索引，然后在数组中找到这个索引的位置i，并且将新创建出来的Entry节点插入到i对应的位置中，
