@@ -126,4 +126,4 @@ Looper的prepareMainLooper方法会调用它内部的prepare方法：
             setThreshold(INITIAL_CAPACITY);
     }
 ```
-在ThreadLocalMap中维护了一个Entry数组，这个Entry继承自WeakReference，以ThreadLocal为key，以ThreadLocal要存储的对象为value，在上面的构造函数中可以看到它先初始化了一个Entry数组，通过ThreadLocal的nextHashCode散列函数得到它在数组中的索引，然后在数组中找到这个索引的位置i，并且将新创建出来的Entry节点插入到i对应的位置中，
+在ThreadLocalMap中维护了一个Entry数组，这个Entry继承自WeakReference，以ThreadLocal为key，以ThreadLocal要存储的对象为value，在上面的构造函数中可以看到它先初始化了一个Entry数组，通过ThreadLocal的nextHashCode散列函数得到它在数组中的索引，然后在数组中找到这个索引的位置i，并且将新创建出来的Entry节点插入到i对应的位置中。当创建完ThreadLocalMap对象之后返回到createMap函数中，它将新创建的对象赋值给Thread的全局变量threadLocals，**也就是说每一个线程内部都会维护一个ThreadLocalMap**，当我们从ThreadLocal中getMap的方法是就是获取当前线程的ThreadLocalMap对象。
